@@ -21,7 +21,7 @@ def is_handset_lifted():
     setup()
     safe_setmode()
     value = GPIO.input(HANDSET_PIN)
-    return GPIO.input(HANDSET_PIN) == GPIO.LOW
+    return GPIO.input(HANDSET_PIN) == GPIO.HIGH
 
 def wait_for_handset_lift(timeout=None):
     """

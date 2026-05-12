@@ -7,6 +7,7 @@ import time
 import websocket
 import socks
 import wave
+import queue
 
 from config import OPENAI_API_KEY
 from gespraechspartner import personen_info
@@ -35,23 +36,30 @@ def send_mic_audio_to_websocket(ws, mic_queue, stop_event):
     """Mikrofondaten an OpenAI WebSocket senden"""
     try:
         while not stop_event.is_set():
-            if not mic_queue.empty():
-                mic_chunk = mic_queue.get()
-                encoded_chunk = base64.b64encode(mic_chunk).decode('utf-8')
-                message = json.dumps({
-                    'type': 'input_audio_buffer.append',
-                    'audio': encoded_chunk
-                })
-                try:
-                    ws.send(message)
-                except Exception as e:
-                    print(f'Fehler beim Senden von Mikrofon-Audio: {e}')
+            try:
+                mic_chunk = mic_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            encoded_chunk = base64.b64encode(mic_chunk).decode('utf-8')
+            message = json.dumps({
+                'type': 'input_audio_buffer.append',
+                'audio': encoded_chunk
+            })
+
+            try:
+                ws.send(message)
+            except Exception as e:
+                print(f'Fehler beim Senden von Mikrofon-Audio: {e}')
+                stop_event.set()
+                break
+
     except Exception as e:
         print(f'Mikrofon-Thread-Fehler: {e}')
     finally:
         print('Mikrofon-Sende-Thread beendet')
 
-def receive_audio_from_websocket(ws, audio_buffer, stop_event, gespraechspartner_ref, role_ref):
+def receive_audio_from_websocket(ws, audio_buffer, audio_lock, stop_event, gespraechspartner_ref, role_ref):
     """Audio und Events vom OpenAI WebSocket empfangen"""
     try:
         while not stop_event.is_set():
@@ -71,10 +79,12 @@ def receive_audio_from_websocket(ws, audio_buffer, stop_event, gespraechspartner
 
             elif event_type == 'response.audio.delta':
                 audio_chunk = base64.b64decode(data['delta'])
-                audio_buffer.extend(audio_chunk)
+                with audio_lock:
+                    audio_buffer.extend(audio_chunk)
 
             elif event_type == 'input_audio_buffer.speech_started':
-                audio_buffer.clear()
+                with audio_lock:
+                    audio_buffer.clear()
 
             elif event_type == 'response.audio_transcript.done':
                 transcript = data.get("transcript", "")
@@ -175,7 +185,7 @@ def inject_greeting_audio(ws, wav_path):
     except Exception as e:
         print(f"Konnte Greeting nicht injizieren: {e}")
 
-def connect_to_openai(mic_queue, audio_buffer, stop_event, role, gespraechspartner, greeting=None):
+def connect_to_openai(mic_queue, audio_buffer, audio_lock, stop_event, role, gespraechspartner, greeting=None):
     """
     Startet die Verbindung zu OpenAI und steuert Sende- & Empfangs-Threads.
     greeting -> Wenn String (Pfad zu WAV) gesetzt, wird diese Datei direkt an KI geschickt.
@@ -195,8 +205,9 @@ def connect_to_openai(mic_queue, audio_buffer, stop_event, role, gespraechspartn
         # Empfangs- und Sende-Threads starten
         recv_thread = threading.Thread(
             target=receive_audio_from_websocket,
-            args=(ws, audio_buffer, stop_event, gespraechspartner, role)
+            args=(ws, audio_buffer, audio_lock, stop_event, gespraechspartner, role)
         )
+
         send_thread = threading.Thread(
             target=send_mic_audio_to_websocket,
             args=(ws, mic_queue, stop_event)

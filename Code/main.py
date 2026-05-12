@@ -11,7 +11,7 @@ import os
 from roles import choose_role, role as role_list
 from openai_ws import connect_to_openai
 from bell import ring_until_answer
-from handset import setup, is_handset_lifted
+from handset import setup, is_handset_lifted, wait_for_handset_hangup
 
 # Audio-Parameter
 CHUNK_SIZE = 2048
@@ -20,8 +20,16 @@ FORMAT = pyaudio.paInt16
 
 # Globale Audio-Puffer & Flags
 audio_buffer = bytearray()
+audio_lock = threading.Lock()
 mic_queue = queue.Queue()
 stop_event = threading.Event()
+
+# Jitter-Buffer für KI-Ausgabe
+# 24 kHz * 2 Bytes = 48.000 Bytes/s
+# 12.000 Bytes ≈ 250 ms Puffer
+MIN_PLAYBACK_BUFFER_BYTES = 12000
+playback_started = False
+speaker_underruns = 0
 
 # Wählscheiben-Parameter
 PULSE_PIN = 26
@@ -42,15 +50,38 @@ REENGAGE_DELAY_MS = 500
 mic_on_at = 0
 
 def speaker_callback(in_data, frame_count, time_info, status):
-    global audio_buffer, mic_on_at
-    bytes_needed = frame_count * 2
-    if len(audio_buffer) >= bytes_needed:
-        chunk = bytes(audio_buffer[:bytes_needed])
-        audio_buffer[:] = audio_buffer[bytes_needed:]
-        mic_on_at = time.time() + REENGAGE_DELAY_MS / 1000
-    else:
-        chunk = bytes(audio_buffer) + b'\x00' * (bytes_needed - len(audio_buffer))
-        audio_buffer.clear()
+    global audio_buffer, mic_on_at, playback_started, speaker_underruns
+
+    bytes_needed = frame_count * 2  # pcm16 mono = 2 Bytes pro Frame
+
+    if status:
+        print("PyAudio speaker status:", status)
+
+    with audio_lock:
+        buffer_len = len(audio_buffer)
+
+        # Erst losspielen, wenn ein kleiner Vorrat da ist.
+        # Dadurch werden kurze Netzwerk-/Threading-Schwankungen abgefangen.
+        if not playback_started:
+            if buffer_len < MIN_PLAYBACK_BUFFER_BYTES:
+                return (b'\x00' * bytes_needed, pyaudio.paContinue)
+            playback_started = True
+
+        if buffer_len >= bytes_needed:
+            chunk = bytes(audio_buffer[:bytes_needed])
+            del audio_buffer[:bytes_needed]
+            mic_on_at = time.time() + REENGAGE_DELAY_MS / 1000
+        else:
+            # Underrun: Puffer leer. Rest mit Stille auffüllen und danach
+            # wieder warten, bis MIN_PLAYBACK_BUFFER_BYTES erreicht sind.
+            speaker_underruns += 1
+            if speaker_underruns % 10 == 0:
+                print(f"Speaker underruns: {speaker_underruns}, buffer={buffer_len} bytes")
+
+            chunk = bytes(audio_buffer) + b'\x00' * (bytes_needed - buffer_len)
+            audio_buffer.clear()
+            playback_started = False
+
     return (chunk, pyaudio.paContinue)
 
 def monitor_handset(stop_event):
@@ -137,10 +168,11 @@ def read_rotary_wheel(timeout=1.5):
         print("Keine Wahl erkannt.")
         return None
     digit = 0 if pulse_count == 11 else pulse_count - 1
+    digit = 0 if pulse_count == 10 else pulse_count # Classic
     print(f"Gewählte Ziffer: {digit}")
     return digit
 
-def play_freitone(repeats=3, tone_dur=1.0, pause_dur=4.0, freq=425):
+def play_freitone(repeats=2, tone_dur=1.0, pause_dur=4.0, freq=425):
     fs = RATE
     for i in range(repeats):
         print(f"Freiton {i+1}/{repeats}: Ton...")
@@ -176,9 +208,16 @@ def wait_for_role_selection():
 def run_conversation(selected_role=None, greeting=False):
     global audio_buffer, mic_queue, stop_event
     stop_event.clear()
-    audio_buffer.clear()
+
+    with audio_lock:
+        audio_buffer.clear()
+
     while not mic_queue.empty():
-        mic_queue.get()
+        try:
+            mic_queue.get_nowait()
+        except queue.Empty:
+            break
+
     p = pyaudio.PyAudio()
     mic_stream = p.open(
         format=FORMAT,
@@ -215,10 +254,11 @@ def run_conversation(selected_role=None, greeting=False):
         connect_to_openai(
             mic_queue,
             audio_buffer,
+            audio_lock,
             stop_event,
             role,
             gespraechspartner,
-            greeting="/home/pi/Desktop/KI-Telefon/greeting.wav" if greeting else None
+            greeting="/home/queaker/KI-Telefon/Code/greeting.wav" if greeting else None
         )
         monitor_thread.join()
     except KeyboardInterrupt:
@@ -232,32 +272,64 @@ def run_conversation(selected_role=None, greeting=False):
         p.terminate()
         print('Audio gestoppt – Gespräch beendet.')
 
+def ensure_idle_on_startup():
+    """
+    Sorgt dafür, dass die State-Machine nur im definierten Zustand startet:
+    Hörer muss aufgelegt sein.
+    """
+    setup()
+
+    if is_handset_lifted():
+        print("Hörer ist beim Start bereits abgehoben.")
+        print("Bitte Hörer auflegen, um die State-Machine zu initialisieren...")
+        wait_for_handset_hangup()
+        time.sleep(0.3)
+
+    print("Startzustand OK: Hörer ist aufgelegt.")
+
 def main():
     setup()
+    ensure_idle_on_startup()
+
     print("Erstes Klingeln...")
     if ring_until_answer(5):
         print("Abgehoben – KI verbunden (eingehend).")
         run_conversation(greeting=False)
+        wait_for_handset_hangup()
+        time.sleep(0.3)
     else:
         print("Niemand hat abgehoben – wechsle in Wartephase.")
+
     next_ring_at = time.time() + AUTOCALL_DELAY
+
     while True:
         if is_handset_lifted():
             print("Hörer in Wartezeit abgehoben – ausgehender Anruf via Dialer.")
             role_number = wait_for_role_selection()
+
             if role_number is not None:
                 run_conversation(selected_role=role_number, greeting=True)
+                wait_for_handset_hangup()
+                time.sleep(0.3)
+
             next_ring_at = time.time() + AUTOCALL_DELAY
             continue
+
         now = time.time()
+
         if now >= next_ring_at:
             print("Wartezeit abgelaufen – starte erneutes Klingeln.")
+
             if ring_until_answer(5):
                 print("Abgehoben – KI verbunden (eingehend).")
                 run_conversation(greeting=False)
+                wait_for_handset_hangup()
+                time.sleep(0.3)
             else:
                 print("Wieder nicht abgehoben – Wartezeit startet neu.")
+
             next_ring_at = time.time() + AUTOCALL_DELAY
+
         time.sleep(0.1)
 
 if __name__ == "__main__":
