@@ -17,6 +17,8 @@ PAUSE_BETWEEN = 1.5 # Pause zwischen Schlägen in Sekunden
 PWM_FREQUENCY = 1000
 DEAD_TIME = 0.003
 
+pwm = None
+
 def setup():
     global pwm
     GPIO.setmode(GPIO.BCM)
@@ -29,8 +31,9 @@ def setup():
 
     # Glocke
     #GPIO.output(ENA, GPIO.HIGH)
-    pwm = GPIO.PWM(ENA, PWM_FREQUENCY)
-    pwm.start(0)
+    if (pwm == None): 
+        pwm = GPIO.PWM(ENA, PWM_FREQUENCY)
+        pwm.start(0)
 
 def bipolar_wave(duration_s, freq=FREQ):
     global pwm
