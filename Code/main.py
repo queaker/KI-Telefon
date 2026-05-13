@@ -38,7 +38,11 @@ FREQ_425HZ = 425
 FREQ_DURATION = 5
 NUM_FREIZEICHEN = 3
 FREIZEICHEN_DELAY = 0.5
+
+# Auto-Call Paramter
+auto_calls_enabled = False
 AUTOCALL_DELAY = 30  # Sekunden bis zum nächsten Klingeln, wenn niemand abnimmt
+AUTO_CALL_TOGGLE = "AUTO_CALL_TOGGLE"
 
 # Mikrofon-Callback
 def mic_callback(in_data, frame_count, time_info, status):
@@ -195,11 +199,10 @@ def wait_for_role_selection():
     role_number = read_rotary_wheel(timeout=1.5)
     print(f"Gewählte Nummer: {role_number}")
     if role_number == 0:
-        print("Shutdown-Sequenz wird ausgeführt...")
+        print("Automatische eingehende KI-Anrufe werden umgeschaltet.")
         stop_dial_tone()
         play_425hz(1)
-        os.system("sudo shutdown now")
-        return None
+        return 0
     print("Teilnehmer wird jetzt angerufen!")
     play_freitone()
     return role_number
@@ -291,44 +294,57 @@ def main():
     setup()
     ensure_idle_on_startup()
 
-    print("Erstes Klingeln...")
-    if ring_until_answer(5):
-        print("Abgehoben – KI verbunden (eingehend).")
-        run_conversation(greeting=False)
-        wait_for_handset_hangup()
-        time.sleep(0.3)
-    else:
-        print("Niemand hat abgehoben – wechsle in Wartephase.")
+    auto_calls_enabled = False
+    next_ring_at = None
 
-    next_ring_at = time.time() + AUTOCALL_DELAY
+    print("Start-Test: einmal kurz klingeln...")
+    ring_until_answer(1)
+    print("Start-Test beendet. Automatische Anrufe sind deaktiviert.")
 
     while True:
         if is_handset_lifted():
-            print("Hörer in Wartezeit abgehoben – ausgehender Anruf via Dialer.")
+            print("Hörer abgehoben – ausgehender Anruf via Dialer.")
             role_number = wait_for_role_selection()
+
+            if role_number == 0:
+                auto_calls_enabled = not auto_calls_enabled
+
+                if auto_calls_enabled:
+                    print("Automatische eingehende KI-Anrufe: AKTIVIERT.")
+                    next_ring_at = time.time() + AUTOCALL_DELAY
+                else:
+                    print("Automatische eingehende KI-Anrufe: DEAKTIVIERT.")
+                    next_ring_at = None
+
+                wait_for_handset_hangup()
+                time.sleep(0.3)
+                continue
 
             if role_number is not None:
                 run_conversation(selected_role=role_number, greeting=True)
                 wait_for_handset_hangup()
                 time.sleep(0.3)
 
-            next_ring_at = time.time() + AUTOCALL_DELAY
+            if auto_calls_enabled:
+                next_ring_at = time.time() + AUTOCALL_DELAY
+
             continue
 
-        now = time.time()
+        if auto_calls_enabled and next_ring_at is not None:
+            now = time.time()
 
-        if now >= next_ring_at:
-            print("Wartezeit abgelaufen – starte erneutes Klingeln.")
+            if now >= next_ring_at:
+                print("Automatik aktiv – starte eingehendes Klingeln.")
 
-            if ring_until_answer(5):
-                print("Abgehoben – KI verbunden (eingehend).")
-                run_conversation(greeting=False)
-                wait_for_handset_hangup()
-                time.sleep(0.3)
-            else:
-                print("Wieder nicht abgehoben – Wartezeit startet neu.")
+                if ring_until_answer(5):
+                    print("Abgehoben – KI verbunden (eingehend).")
+                    run_conversation(greeting=False)
+                    wait_for_handset_hangup()
+                    time.sleep(0.3)
+                else:
+                    print("Niemand hat abgehoben – Wartezeit startet neu.")
 
-            next_ring_at = time.time() + AUTOCALL_DELAY
+                next_ring_at = time.time() + AUTOCALL_DELAY
 
         time.sleep(0.1)
 
