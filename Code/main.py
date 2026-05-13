@@ -43,6 +43,7 @@ FREIZEICHEN_DELAY = 0.5
 auto_calls_enabled = False
 AUTOCALL_DELAY = 30  # Sekunden bis zum nächsten Klingeln, wenn niemand abnimmt
 AUTO_CALL_TOGGLE = "AUTO_CALL_TOGGLE"
+HANDSET_HANGUP = "HANDSET_HANGUP"
 
 # Mikrofon-Callback
 def mic_callback(in_data, frame_count, time_info, status):
@@ -145,6 +146,7 @@ def read_rotary_wheel(timeout=1.5):
     last_pulse_time = [0.0]
     first_seen = [False]
     MIN_PULSE_SEPARATION = 0.05
+
     def pulse_callback(channel):
         nonlocal pulse_count
         now = time.time()
@@ -156,18 +158,32 @@ def read_rotary_wheel(timeout=1.5):
                 stop_dial_tone()
                 print("Wählscheibe aktiv – Impulse werden gezählt.")
             print(f"Impuls erkannt! Gesamt: {pulse_count}")
+
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(PULSE_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     try:
         GPIO.remove_event_detect(PULSE_PIN)
     except Exception:
         pass
+
     GPIO.add_event_detect(PULSE_PIN, GPIO.FALLING, callback=pulse_callback)
-    while True:
-        if first_seen[0] and (time.time() - last_pulse_time[0]) > timeout:
-            break
-        time.sleep(0.005)
-    GPIO.remove_event_detect(PULSE_PIN)
+
+    try:
+        while True:
+            if not is_handset_lifted():
+                print("Hörer aufgelegt während der Wahl.")
+                return HANDSET_HANGUP
+
+            if first_seen[0] and (time.time() - last_pulse_time[0]) > timeout:
+                break
+
+            time.sleep(0.005)
+    finally:
+        try:
+            GPIO.remove_event_detect(PULSE_PIN)
+        except Exception:
+            pass
+
     if pulse_count == 0:
         print("Keine Wahl erkannt.")
         return None
@@ -179,15 +195,31 @@ def read_rotary_wheel(timeout=1.5):
 def play_freitone(repeats=2, tone_dur=1.0, pause_dur=4.0, freq=425):
     fs = RATE
     for i in range(repeats):
+        if not is_handset_lifted():
+            print("Hörer aufgelegt während Freiton.")
+            return False
+
         print(f"Freiton {i+1}/{repeats}: Ton...")
         t = np.linspace(0, tone_dur, int(fs * tone_dur), endpoint=False)
         signal = 0.1 * np.sin(2 * np.pi * freq * t)
         sd.play(signal, samplerate=fs)
         sd.wait()
-        if i < repeats - 1:        
+
+        if not is_handset_lifted():
+            print("Hörer aufgelegt während Freiton.")
+            return False
+
+        if i < repeats - 1:
             print("Pause...")
-            time.sleep(pause_dur)
+            pause_until = time.time() + pause_dur
+            while time.time() < pause_until:
+                if not is_handset_lifted():
+                    print("Hörer aufgelegt während Freiton-Pause.")
+                    return False
+                time.sleep(0.05)
+
     print("Freiton beendet – KI übernimmt nun.")
+    return True
 
 # Angepasst
 def wait_for_role_selection():
@@ -198,13 +230,29 @@ def wait_for_role_selection():
     start_dial_tone()
     role_number = read_rotary_wheel(timeout=1.5)
     print(f"Gewählte Nummer: {role_number}")
+
+    if role_number == HANDSET_HANGUP:
+        stop_dial_tone()
+        print("Wahl abgebrochen, weil aufgelegt wurde.")
+        return None
+
+    if role_number is None:
+        stop_dial_tone()
+        print("Keine Wahl erkannt.")
+        return None
+
     if role_number == 0:
         print("Automatische eingehende KI-Anrufe werden umgeschaltet.")
         stop_dial_tone()
         play_425hz(1)
-        return 0
+        return AUTO_CALL_TOGGLE
+
     print("Teilnehmer wird jetzt angerufen!")
-    play_freitone()
+    stop_dial_tone()
+
+    if not play_freitone():
+        return None
+
     return role_number
 
 # Angepasst
@@ -306,7 +354,7 @@ def main():
             print("Hörer abgehoben – ausgehender Anruf via Dialer.")
             role_number = wait_for_role_selection()
 
-            if role_number == 0:
+            if role_number == AUTO_CALL_TOGGLE:
                 auto_calls_enabled = not auto_calls_enabled
 
                 if auto_calls_enabled:
