@@ -20,6 +20,13 @@ Dieser Fork baut auf dem ursprünglichen KI-Telefon-Projekt auf und ergänzt die
 
 Der Grundgedanke bleibt unverändert: Man hebt den Hörer ab, wählt mit der Wählscheibe eine Nummer und spricht anschließend mit einer KI-Rolle. Die Änderungen betreffen vor allem den Programmablauf in `main.py` und die Realtime-Anbindung in `openai_ws.py`.
 
+## Weitere Projektdokumentation
+
+Ergänzend zum Make-Artikel gibt es auf der Webseite des FabLab Paderborn den Artikel 
+**[„Wenn das Telefon plötzlich mit KI spricht“](https://fablab-paderborn.de/2026/05/wenn-das-telefon-ploetzlich-mit-ki-spricht/)**. 
+
+Dort sind Bilder vom Bau des Telefons und Eindrücke aus dem Aufbau dokumentiert.
+
 ## Bedienung
 
 Nach dem Start klingelt das Telefon einmal kurz. Dieses kurze Klingeln ist nur ein Funktionstest und startet noch kein Gespräch.
