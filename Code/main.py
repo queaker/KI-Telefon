@@ -140,6 +140,46 @@ def play_425hz(duration=FREQ_DURATION):
     sd.play(signal, samplerate=fs)
     sd.wait()
 
+def play_automation_signal(state):
+    """Akustische Bestätigung für die Automatik"""
+    fs = RATE
+
+    if (state == True):
+        sequence = [
+            (740,  0.07),
+            (0,    0.025),
+            (880,  0.07),
+            (0,    0.025),
+            (988,  0.07),
+            (0,    0.04),
+            (1175, 0.09),
+            (0,    0.04),
+            (1568, 0.12),
+            (0,    0.06),
+            (1175, 0.16),
+        ]
+    else:
+        sequence = [
+            (1568, 0.08),
+            (0,    0.03),
+            (1175, 0.08),
+            (0,    0.03),
+            (988,  0.08),
+            (0,    0.04),
+            (740,  0.18),
+        ]
+
+    signal_parts = []
+    for freq, duration in sequence:
+        samples = int(fs * duration)
+        if freq == 0:
+            signal_parts.append(np.zeros(samples, dtype=np.float32))
+        else:
+            t = np.linspace(0, duration, samples, endpoint=False)
+            signal_parts.append((0.18 * np.sin(2 * np.pi * freq * t)).astype(np.float32))
+    sd.play(np.concatenate(signal_parts), samplerate=fs)
+    sd.wait()
+
 def read_rotary_wheel(timeout=1.5):
     """
     Liest eine Ziffer von der Wählscheibe und protokolliert Diagnosewerte.
@@ -364,7 +404,6 @@ def wait_for_role_selection():
     if role_number == 0:
         print("Automatische eingehende KI-Anrufe werden umgeschaltet.")
         stop_dial_tone()
-        play_425hz(1)
         return AUTO_CALL_TOGGLE
 
     print("Teilnehmer wird jetzt angerufen!")
@@ -479,9 +518,11 @@ def main():
 
                 if auto_calls_enabled:
                     print("Automatische eingehende KI-Anrufe: AKTIVIERT.")
+                    play_automation_signal(True)
                     next_ring_at = time.time() + AUTOCALL_DELAY
                 else:
                     print("Automatische eingehende KI-Anrufe: DEAKTIVIERT.")
+                    play_automation_signal(False)
                     next_ring_at = None
 
                 wait_for_handset_hangup()
