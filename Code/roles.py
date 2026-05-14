@@ -1,9 +1,9 @@
 import random
 
 # Definiere die festgelegten Anweisungsvarianten
-instructions_1 = "und Du erhältst einen Anruf am Telefon. Höre hauptsächlich zu, antworte kurz. Erfrage den Namen des Anrufers. Sei kreativ, nutze Füllwörter, schweife ab. Beende Deine Antwort nicht mit einer Frage. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
-instructions_2 = "und Du erhältst einen Anruf am Telefon. Höre erstmal zu, antworte ausführlich. Erfrage den Namen des Anrufers. Sei schlau, und belesen. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
-instructions_3 = "und Du erhältst einen Anruf am Telefon. Kommuniziere präzise, höre gut zu. Erfrage den Namen des Anrufers. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
+instructions_1 = "und Du erhältst einen Anruf am Telefon. Stell dich kurz in einem Satz vor. Höre hauptsächlich zu, antworte kurz. Erfrage den Namen des Anrufers. Sei kreativ, nutze Füllwörter, schweife ab. Beende Deine Antwort nicht mit einer Frage. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
+instructions_2 = "und Du erhältst einen Anruf am Telefon. Stell dich kurz in einem Satz vor. Höre erstmal zu, antworte ausführlich. Erfrage den Namen des Anrufers. Sei schlau, und belesen. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
+instructions_3 = "und Du erhältst einen Anruf am Telefon. Stell dich kurz in einem Satz vor. Kommuniziere präzise, höre gut zu. Erfrage den Namen des Anrufers. Gib dich nicht als KI zu erkennen. Frage nach dem Namen des Anrufers, dann bekommst Du weitere Informationen der Person."
 
 role = [
     {
