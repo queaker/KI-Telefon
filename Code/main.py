@@ -6,7 +6,6 @@ import RPi.GPIO as GPIO
 GPIO.setmode(GPIO.BCM)
 import sounddevice as sd
 import numpy as np
-import os
 
 from roles import choose_role, role as role_list
 from openai_ws import connect_to_openai
@@ -142,22 +141,120 @@ def play_425hz(duration=FREQ_DURATION):
     sd.wait()
 
 def read_rotary_wheel(timeout=1.5):
+    """
+    Liest eine Ziffer von der Wählscheibe und protokolliert Diagnosewerte.
+
+    Die Instrumentierung zählt noch NICHT anders als vorher. Sie schreibt nur
+    Timinginformationen zu Roh-Impulsen, akzeptierten Impulsen und verworfenen
+    Impulsen, damit man später einen besseren Filter ableiten kann.
+    """
     pulse_count = 0
     last_pulse_time = [0.0]
     first_seen = [False]
-    MIN_PULSE_SEPARATION = 0.05
+    dial_start = time.monotonic()
+
+    # Aktueller Software-Filter. Zum Messen bewusst unverändert lassen.
+    MIN_PULSE_SEPARATION = 0.08
+
+    # Diagnosewerte
+    raw_events = []       # alle FALLING callbacks
+    accepted_events = []  # Impulse, die den aktuellen Filter passiert haben
+    rejected_events = []  # Impulse, die wegen MIN_PULSE_SEPARATION verworfen wurden
+    last_raw_time = [None]
+
+    def ms(value_s):
+        return value_s * 1000.0
+
+    def fmt_ms(value_s):
+        if value_s is None:
+            return "----"
+        return f"{ms(value_s):7.1f}ms"
+
+    def summarize_intervals(label, events):
+        if len(events) < 2:
+            print(f"[DIAL SUMMARY] {label}: zu wenige Ereignisse für Intervalle")
+            return
+
+        intervals = [events[i]["t"] - events[i - 1]["t"] for i in range(1, len(events))]
+        intervals_ms = [ms(v) for v in intervals]
+        avg_ms = sum(intervals_ms) / len(intervals_ms)
+
+        print(
+            f"[DIAL SUMMARY] {label}: n={len(events)}, "
+            f"dt_min={min(intervals_ms):.1f}ms, "
+            f"dt_avg={avg_ms:.1f}ms, "
+            f"dt_max={max(intervals_ms):.1f}ms, "
+            f"intervalle={[round(v, 1) for v in intervals_ms]}"
+        )
+
+    print(
+        f"[DIAL START] timeout={timeout:.3f}s, "
+        f"MIN_PULSE_SEPARATION={MIN_PULSE_SEPARATION:.3f}s"
+    )
 
     def pulse_callback(channel):
         nonlocal pulse_count
-        now = time.time()
-        if now - last_pulse_time[0] > MIN_PULSE_SEPARATION:
+
+        now = time.monotonic()
+        gpio_value = GPIO.input(PULSE_PIN)
+        since_start = now - dial_start
+        dt_raw = None if last_raw_time[0] is None else now - last_raw_time[0]
+        dt_accepted = None if last_pulse_time[0] == 0.0 else now - last_pulse_time[0]
+
+        raw_index = len(raw_events) + 1
+        raw_event = {
+            "idx": raw_index,
+            "t": now,
+            "since_start": since_start,
+            "dt_raw": dt_raw,
+            "dt_accepted": dt_accepted,
+            "gpio": gpio_value,
+        }
+        raw_events.append(raw_event)
+        last_raw_time[0] = now
+
+        passes_filter = last_pulse_time[0] == 0.0 or (now - last_pulse_time[0]) > MIN_PULSE_SEPARATION
+
+        print(
+            f"[DIAL RAW] #{raw_index:02d} "
+            f"t=+{ms(since_start):8.1f}ms "
+            f"dt_raw={fmt_ms(dt_raw)} "
+            f"dt_since_counted={fmt_ms(dt_accepted)} "
+            f"gpio={gpio_value} "
+            f"decision={'COUNT' if passes_filter else 'REJECT'}"
+        )
+
+        if passes_filter:
             pulse_count += 1
             last_pulse_time[0] = now
+            accepted_events.append({
+                "idx": pulse_count,
+                "raw_idx": raw_index,
+                "t": now,
+                "since_start": since_start,
+                "dt_raw": dt_raw,
+                "dt_accepted": dt_accepted,
+                "gpio": gpio_value,
+            })
+
             if not first_seen[0]:
                 first_seen[0] = True
                 stop_dial_tone()
                 print("Wählscheibe aktiv – Impulse werden gezählt.")
-            print(f"Impuls erkannt! Gesamt: {pulse_count}")
+
+            print(
+                f"Impuls erkannt! Gesamt: {pulse_count} "
+                f"(raw=#{raw_index}, t=+{ms(since_start):.1f}ms, "
+                f"dt_raw={fmt_ms(dt_raw)}, "
+                f"dt_vorheriger_gezählter={fmt_ms(dt_accepted)})"
+            )
+        else:
+            rejected_events.append(raw_event)
+            print(
+                f"[DIAL REJECT] raw=#{raw_index}, "
+                f"dt_vorheriger_gezählter={fmt_ms(dt_accepted)} "
+                f"<= {ms(MIN_PULSE_SEPARATION):.1f}ms"
+            )
 
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(PULSE_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -172,9 +269,13 @@ def read_rotary_wheel(timeout=1.5):
         while True:
             if not is_handset_lifted():
                 print("Hörer aufgelegt während der Wahl.")
+                print(
+                    f"[DIAL ABORT] raw={len(raw_events)}, "
+                    f"accepted={len(accepted_events)}, rejected={len(rejected_events)}"
+                )
                 return HANDSET_HANGUP
 
-            if first_seen[0] and (time.time() - last_pulse_time[0]) > timeout:
+            if first_seen[0] and (time.monotonic() - last_pulse_time[0]) > timeout:
                 break
 
             time.sleep(0.005)
@@ -184,12 +285,29 @@ def read_rotary_wheel(timeout=1.5):
         except Exception:
             pass
 
+    print(
+        f"[DIAL SUMMARY] raw={len(raw_events)}, "
+        f"accepted={len(accepted_events)}, rejected={len(rejected_events)}, "
+        f"dauer={ms(time.monotonic() - dial_start):.1f}ms"
+    )
+    summarize_intervals("raw", raw_events)
+    summarize_intervals("accepted", accepted_events)
+
+    if rejected_events:
+        rejected_dts = [e["dt_accepted"] for e in rejected_events if e["dt_accepted"] is not None]
+        rejected_ms = [ms(v) for v in rejected_dts]
+        print(
+            f"[DIAL SUMMARY] rejected_dt_since_counted_ms="
+            f"{[round(v, 1) for v in rejected_ms]}"
+        )
+
     if pulse_count == 0:
         print("Keine Wahl erkannt.")
         return None
+
     digit = 0 if pulse_count == 11 else pulse_count - 1
     digit = 0 if pulse_count == 10 else pulse_count # Classic
-    print(f"Gewählte Ziffer: {digit}")
+    print(f"Gewählte Ziffer: {digit} aus pulse_count={pulse_count}")
     return digit
 
 def play_freitone(repeats=2, tone_dur=1.0, pause_dur=4.0, freq=425):
@@ -226,8 +344,10 @@ def wait_for_role_selection():
     print("Hörer abheben, um Rolle auszuwählen...")
     while not is_handset_lifted():
         time.sleep(0.05)
+
     print("Hörer abgehoben – Freizeichen aktiv. Bitte wählen...")
     start_dial_tone()
+
     role_number = read_rotary_wheel(timeout=1.5)
     print(f"Gewählte Nummer: {role_number}")
 
