@@ -22,6 +22,8 @@ Der Grundgedanke bleibt unverändert: Man hebt den Hörer ab, wählt mit der Wä
 
 ## Weitere Projektdokumentation
 
+![Projektdokumentation](./doc/telefon.png)
+
 Ergänzend zum Make-Artikel gibt es auf der Webseite des FabLab Paderborn den Artikel 
 **[„Wenn das Telefon plötzlich mit KI spricht“](https://fablab-paderborn.de/2026/05/wenn-das-telefon-ploetzlich-mit-ki-spricht/)**. 
 
