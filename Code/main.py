@@ -191,6 +191,7 @@ def read_rotary_wheel(timeout=1.5):
     pulse_count = 0
     last_pulse_time = [0.0]
     first_seen = [False]
+    dial_tone_stop_requested = [False]
     dial_start = time.monotonic()
 
     # Aktueller Software-Filter. Zum Messen bewusst unverändert lassen.
@@ -279,7 +280,7 @@ def read_rotary_wheel(timeout=1.5):
 
             if not first_seen[0]:
                 first_seen[0] = True
-                stop_dial_tone()
+                dial_tone_stop_requested[0] = True
                 print("Wählscheibe aktiv – Impulse werden gezählt.")
 
             print(
@@ -307,6 +308,11 @@ def read_rotary_wheel(timeout=1.5):
 
     try:
         while True:
+
+            if dial_tone_stop_requested[0]:
+                dial_tone_stop_requested[0] = False
+                stop_dial_tone()
+
             if not is_handset_lifted():
                 print("Hörer aufgelegt während der Wahl.")
                 print(
