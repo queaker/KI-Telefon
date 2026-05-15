@@ -108,8 +108,34 @@ Die OpenAI-Realtime-Anbindung wurde klarer strukturiert. Dazu gehören:
 - robustere Fehlerausgaben,
 - aktualisierte Session-Konfiguration für die neuere Realtime-API-Struktur.
 
+### Rollenabhängige Realtime-Modelle
+
+In der ursprünglichen Firmware wurde das OpenAI-Realtime-Modell zentral in `openai_ws.py` festgelegt. Dadurch verwendeten alle KI-Rollen dasselbe Modell.
+
+In diesem Fork kann jede Rolle in `roles.py` optional ein eigenes Modell angeben:
+
+```python
+{
+    "name": "Verrückter Professor",
+    "voice_id": "ash",
+    "model": "gpt-realtime-2",
+    "gpt_style": "...",
+    "speed": 1.0
+}
+````
+
+Wenn eine Rolle kein eigenes `model` definiert, verwendet die Firmware automatisch das Standardmodell:
+
+```python
+DEFAULT_MODEL = "gpt-realtime-mini"
+```
+
+Damit können einfache Rollen weiterhin ressourcenschonend mit dem Standardmodell laufen, während anspruchsvollere Rollen wie **„Verrückter Professor“** oder **„Künstliche Intelligenz“** gezielt ein leistungsfähigeres Modell verwenden.
+
+
 ## Wichtige Dateien
 
+- `config.py`: (private) Konfiguration
 - `main.py`: Hauptprogramm, Bedienlogik, Wählscheibe, Automatikmodus, Audioausgabe.
 - `bell.py`: Ansteuerung der Telefonklingel.
 - `handset.py`: Erkennung, ob der Hörer abgehoben oder aufgelegt ist.
