@@ -8,7 +8,7 @@ import sounddevice as sd
 import numpy as np
 
 from roles import choose_role, role as role_list
-from openai_ws import connect_to_openai
+from openai_ws import connect_to_openai, start_openai_session
 from bell import ring_until_answer
 from handset import setup, is_handset_lifted, wait_for_handset_hangup
 
@@ -43,6 +43,7 @@ auto_calls_enabled = False
 AUTOCALL_DELAY = 30  # Sekunden bis zum nächsten Klingeln, wenn niemand abnimmt
 AUTO_CALL_TOGGLE = "AUTO_CALL_TOGGLE"
 HANDSET_HANGUP = "HANDSET_HANGUP"
+GREETING_WAV = "/home/queaker/KI-Telefon/Code/greeting.wav"
 
 # Mikrofon-Callback
 def mic_callback(in_data, frame_count, time_info, status):
@@ -415,25 +416,37 @@ def wait_for_role_selection():
     print("Teilnehmer wird jetzt angerufen!")
     stop_dial_tone()
 
-    if not play_freitone():
-        return None
-
+    # Der Freiton wird jetzt im main()-Flow abgespielt, damit parallel dazu
+    # bereits die OpenAI-Session aufgebaut und greeting.wav verarbeitet werden kann.
     return role_number
 
-# Angepasst
-def run_conversation(selected_role=None, greeting=False):
-    global audio_buffer, mic_queue, stop_event
-    stop_event.clear()
-
+def clear_conversation_buffers():
+    """Leert Audio-Puffer, damit kein altes Gespräch in die neue Session läuft."""
+    global playback_started, speaker_underruns
     with audio_lock:
         audio_buffer.clear()
-
     while not mic_queue.empty():
         try:
             mic_queue.get_nowait()
         except queue.Empty:
             break
+    playback_started = False
+    speaker_underruns = 0
 
+
+def role_ref_for_selection(selected_role=None):
+    """Gibt eine mutable Role-Referenz im Format zurück, das openai_ws erwartet."""
+    if selected_role is None:
+        return [choose_role()]
+
+    if 1 <= selected_role <= len(role_list):
+        return [role_list[selected_role - 1]]
+
+    print("Ungültige Nummer – wähle zufällig.")
+    return [choose_role()]
+
+
+def open_audio_streams():
     p = pyaudio.PyAudio()
     mic_stream = p.open(
         format=FORMAT,
@@ -451,41 +464,86 @@ def run_conversation(selected_role=None, greeting=False):
         stream_callback=speaker_callback,
         frames_per_buffer=CHUNK_SIZE
     )
-    if selected_role is None:
-        role = [choose_role()]
+    return p, mic_stream, speaker_stream
+
+
+def close_audio_streams(p, mic_stream, speaker_stream):
+    try:
+        if mic_stream is not None:
+            mic_stream.stop_stream()
+            mic_stream.close()
+    finally:
+        try:
+            if speaker_stream is not None:
+                speaker_stream.stop_stream()
+                speaker_stream.close()
+        finally:
+            if p is not None:
+                p.terminate()
+
+
+# Angepasst: kann eine bereits vorgewärmte Session übernehmen.
+def run_conversation(selected_role=None, greeting=False, prewarmed_session=None, preselected_role=None, preselected_partner=None):
+    global stop_event
+
+    if prewarmed_session is None:
+        stop_event.clear()
+        clear_conversation_buffers()
+        role = role_ref_for_selection(selected_role)
+        gespraechspartner = [None]
+        session = None
     else:
-        if 1 <= selected_role <= len(role_list):
-            role = [role_list[selected_role - 1]]
-        else:
-            print("Ungültige Nummer – wähle zufällig.")
-            role = [choose_role()]
-    gespraechspartner = [None]
+        session = prewarmed_session
+        role = preselected_role or session.role
+        gespraechspartner = preselected_partner or session.gespraechspartner
+
     print(f"Rolle: {role[0]['name']}")
     print(f"Stil: {role[0]['gpt_style']}")
+
+    p = mic_stream = speaker_stream = None
+    monitor_thread = None
+
     try:
+        p, mic_stream, speaker_stream = open_audio_streams()
         mic_stream.start_stream()
         speaker_stream.start_stream()
+
         monitor_thread = threading.Thread(target=monitor_handset, args=(stop_event,))
         monitor_thread.start()
-        connect_to_openai(
-            mic_queue,
-            audio_buffer,
-            audio_lock,
-            stop_event,
-            role,
-            gespraechspartner,
-            greeting="/home/queaker/KI-Telefon/Code/greeting.wav" if greeting else None
-        )
-        monitor_thread.join()
+
+        if session is None:
+            session = start_openai_session(
+                mic_queue,
+                audio_buffer,
+                audio_lock,
+                stop_event,
+                role,
+                gespraechspartner,
+                greeting=GREETING_WAV if greeting else None,
+                enable_microphone=True,
+            )
+        else:
+            # Ab jetzt ist der echte Hörer am Gespräch, vorher blieb das Mikro gesperrt.
+            session.start_microphone()
+
+        session.join()
+
+        if monitor_thread is not None:
+            monitor_thread.join()
+
     except KeyboardInterrupt:
         print('Beenden...')
         stop_event.set()
+        if session is not None:
+            session.close()
     finally:
-        mic_stream.stop_stream()
-        mic_stream.close()
-        speaker_stream.stop_stream()
-        speaker_stream.close()
-        p.terminate()
+        stop_event.set()
+        if session is not None:
+            session.close()
+            session.join(timeout=2.0)
+        if monitor_thread is not None and monitor_thread.is_alive():
+            monitor_thread.join(timeout=2.0)
+        close_audio_streams(p, mic_stream, speaker_stream)
         print('Audio gestoppt – Gespräch beendet.')
 
 def ensure_idle_on_startup():
@@ -536,9 +594,35 @@ def main():
                 continue
 
             if role_number is not None:
-                run_conversation(selected_role=role_number, greeting=True)
-                wait_for_handset_hangup()
-                time.sleep(0.3)
+                # Rolle steht jetzt fest. Während der Mensch den Freiton hört,
+                # wird OpenAI schon verbunden und greeting.wav an die KI geschickt.
+                stop_event.clear()
+                clear_conversation_buffers()
+                role = role_ref_for_selection(role_number)
+                gespraechspartner = [None]
+                session = start_openai_session(
+                    mic_queue,
+                    audio_buffer,
+                    audio_lock,
+                    stop_event,
+                    role,
+                    gespraechspartner,
+                    greeting=GREETING_WAV,
+                    enable_microphone=False,
+                )
+
+                if play_freitone():
+                    run_conversation(
+                        prewarmed_session=session,
+                        preselected_role=role,
+                        preselected_partner=gespraechspartner,
+                    )
+                    wait_for_handset_hangup()
+                    time.sleep(0.3)
+                else:
+                    print("Freiton abgebrochen – vorgewärmte KI-Session wird geschlossen.")
+                    session.close()
+                    session.join(timeout=2.0)
 
             if auto_calls_enabled:
                 next_ring_at = time.time() + AUTOCALL_DELAY
@@ -551,13 +635,36 @@ def main():
             if now >= next_ring_at:
                 print("Automatik aktiv – starte eingehendes Klingeln.")
 
+                # Schon während des Klingelns vorwärmen: Rolle wählen und
+                # WebSocket-Session öffnen. Mikrofon bleibt bis zum Abheben aus.
+                stop_event.clear()
+                clear_conversation_buffers()
+                role = role_ref_for_selection(None)
+                gespraechspartner = [None]
+                session = start_openai_session(
+                    mic_queue,
+                    audio_buffer,
+                    audio_lock,
+                    stop_event,
+                    role,
+                    gespraechspartner,
+                    greeting=None,
+                    enable_microphone=False,
+                )
+
                 if ring_until_answer(5):
-                    print("Abgehoben – KI verbunden (eingehend).")
-                    run_conversation(greeting=False)
+                    print("Abgehoben – vorgewärmte KI-Session übernimmt (eingehend).")
+                    run_conversation(
+                        prewarmed_session=session,
+                        preselected_role=role,
+                        preselected_partner=gespraechspartner,
+                    )
                     wait_for_handset_hangup()
                     time.sleep(0.3)
                 else:
-                    print("Niemand hat abgehoben – Wartezeit startet neu.")
+                    print("Niemand hat abgehoben – vorgewärmte KI-Session wird geschlossen.")
+                    session.close()
+                    session.join(timeout=2.0)
 
                 next_ring_at = time.time() + AUTOCALL_DELAY
 

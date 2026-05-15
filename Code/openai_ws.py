@@ -219,7 +219,14 @@ def msg_session_update(gespraechspartner_ref, role_ref) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def ws_send_json(ws, payload: Dict[str, Any]) -> None:
-    ws.send(json.dumps(payload, ensure_ascii=False))
+    """Thread-sicheres Senden über die WebSocket-Verbindung."""
+    lock = getattr(ws, "_send_lock", None)
+    message = json.dumps(payload, ensure_ascii=False)
+    if lock is None:
+        ws.send(message)
+    else:
+        with lock:
+            ws.send(message)
 
 
 def create_connection_with_ipv4(*args, **kwargs):
@@ -236,13 +243,21 @@ def create_connection_with_ipv4(*args, **kwargs):
         socket.getaddrinfo = original_getaddrinfo
 
 
-def send_mic_audio_to_websocket(ws, mic_queue, stop_event, machine: RealtimeMachine):
-    """Mikrofondaten an OpenAI WebSocket senden."""
+def send_mic_audio_to_websocket(ws, mic_queue, stop_event, machine: RealtimeMachine, mic_enabled_event=None):
+    """Mikrofondaten an OpenAI WebSocket senden.
+
+    Bei vorgewärmten Sessions kann mic_enabled_event verhindern, dass während
+    des Freitons/Klingelns bereits Umgebungsgeräusche oder Ton-Signale zur KI
+    geschickt werden. Alte Queue-Daten werden dabei verworfen.
+    """
     try:
         while not stop_event.is_set():
             try:
                 mic_chunk = mic_queue.get(timeout=0.1)
             except queue.Empty:
+                continue
+
+            if mic_enabled_event is not None and not mic_enabled_event.is_set():
                 continue
 
             if not machine.is_ready_for_audio:
@@ -378,78 +393,167 @@ def inject_greeting_audio(ws, wav_path, *, server_vad: bool = True):
         print(f"Konnte Greeting nicht injizieren: {e}")
 
 
-def connect_to_openai(mic_queue, audio_buffer, audio_lock, stop_event, role, gespraechspartner, greeting=None):
+class OpenAIRealtimeSession:
+    """Startet und hält eine OpenAI-Realtime-Session im Hintergrund.
+
+    Damit kann die Verbindung schon während Freiton/Klingeln aufgebaut werden.
+    Die Mikrofonübertragung bleibt bis start_microphone() gesperrt.
     """
-    Startet die Verbindung zu OpenAI und steuert Sende- & Empfangs-Threads.
-    greeting -> Wenn String (Pfad zu WAV) gesetzt, wird diese Datei direkt an KI geschickt.
-    """
-    ws = None
-    machine = RealtimeMachine()
 
-    try:
-        machine.transition(RealtimeState.CONNECTING, "connect")
-        selected_model = model_for_role(role)
-        print(f"Realtime-Modell: {selected_model}")
+    def __init__(self, mic_queue, audio_buffer, audio_lock, stop_event, role, gespraechspartner, greeting=None):
+        self.mic_queue = mic_queue
+        self.audio_buffer = audio_buffer
+        self.audio_lock = audio_lock
+        self.stop_event = stop_event
+        self.role = role
+        self.gespraechspartner = gespraechspartner
+        self.greeting = greeting
 
-        ws = create_connection_with_ipv4(
-            ws_url_for_model(selected_model),
-            header=[
-                f"Authorization: Bearer {API_KEY}",
-                # GA: Kein 'OpenAI-Beta: realtime=v1' Header mehr.
-            ],
-            sslopt={"cert_reqs": ssl.CERT_NONE},
-        )
-        machine.transition(RealtimeState.CONNECTED, "websocket_open")
-        print("Mit OpenAI WebSocket verbunden")
+        self.machine = RealtimeMachine()
+        self.ws = None
+        self.thread = None
+        self.recv_thread = None
+        self.send_thread = None
+        self.mic_enabled_event = threading.Event()
+        self.ready_event = threading.Event()
+        self.closed_event = threading.Event()
+        self.error = None
 
-        recv_thread = threading.Thread(
-            target=receive_audio_from_websocket,
-            args=(ws, audio_buffer, audio_lock, stop_event, gespraechspartner, role, machine),
-            daemon=True,
-        )
+    def start(self, enable_microphone: bool = False):
+        if enable_microphone:
+            self.mic_enabled_event.set()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        return self
 
-        send_thread = threading.Thread(
-            target=send_mic_audio_to_websocket,
-            args=(ws, mic_queue, stop_event, machine),
-            daemon=True,
-        )
+    def start_microphone(self):
+        # Wegwerfen, was vor dem echten Gespräch im Puffer gelandet ist.
+        while not self.mic_queue.empty():
+            try:
+                self.mic_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.mic_enabled_event.set()
+        print("Mikrofonübertragung zur KI aktiviert.")
 
-        recv_thread.start()
-        send_thread.start()
+    def wait_until_ready(self, timeout=None) -> bool:
+        return self.ready_event.wait(timeout=timeout)
 
-        # Kein zusätzliches Session-Update hier: Wir warten auf session.created und senden
-        # dann genau ein session.update im Empfangs-Thread. Das verhindert doppelte Updates.
-
-        if greeting:
-            # Kurze Wartephase, bis session.updated angekommen ist.
-            for _ in range(50):
-                if machine.seen_session_update:
-                    break
-                time.sleep(0.1)
-
-            print(f"Starte Greeting (.wav) für KI: {greeting}")
-            inject_greeting_audio(ws, greeting)
-
-        while not stop_event.is_set():
-            time.sleep(0.1)
-
-        machine.transition(RealtimeState.CLOSING, "stop_event")
+    def close(self):
+        self.stop_event.set()
         try:
-            ws.send_close()
+            if self.ws:
+                self.ws.send_close()
         except Exception:
             pass
 
-        recv_thread.join(timeout=2.0)
-        send_thread.join(timeout=2.0)
-        machine.transition(RealtimeState.CLOSED, "closed")
-        print("Verbindung geschlossen")
+    def join(self, timeout=None):
+        if self.thread:
+            self.thread.join(timeout=timeout)
 
-    except Exception as e:
-        print(f"Verbindung fehlgeschlagen: {e}")
-        machine.transition(RealtimeState.ERROR, "connect_to_openai")
-    finally:
-        if ws:
+    def _run(self):
+        try:
+            self.machine.transition(RealtimeState.CONNECTING, "connect")
+            selected_model = model_for_role(self.role)
+            print(f"Realtime-Modell: {selected_model}")
+
+            self.ws = create_connection_with_ipv4(
+                ws_url_for_model(selected_model),
+                header=[
+                    f"Authorization: Bearer {API_KEY}",
+                    # GA: Kein 'OpenAI-Beta: realtime=v1' Header mehr.
+                ],
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+            )
+            self.ws._send_lock = threading.Lock()
+            self.machine.transition(RealtimeState.CONNECTED, "websocket_open")
+            print("Mit OpenAI WebSocket verbunden")
+
+            self.recv_thread = threading.Thread(
+                target=receive_audio_from_websocket,
+                args=(self.ws, self.audio_buffer, self.audio_lock, self.stop_event, self.gespraechspartner, self.role, self.machine),
+                daemon=True,
+            )
+
+            self.send_thread = threading.Thread(
+                target=send_mic_audio_to_websocket,
+                args=(self.ws, self.mic_queue, self.stop_event, self.machine, self.mic_enabled_event),
+                daemon=True,
+            )
+
+            self.recv_thread.start()
+            self.send_thread.start()
+
+            # Warten, bis das session.update vom Empfangs-Thread bestätigt wurde.
+            for _ in range(50):
+                if self.machine.seen_session_update:
+                    break
+                if self.stop_event.is_set():
+                    break
+                time.sleep(0.1)
+
+            if self.machine.seen_session_update:
+                self.ready_event.set()
+
+            if self.greeting and not self.stop_event.is_set():
+                print(f"Starte Greeting (.wav) für KI: {self.greeting}")
+                inject_greeting_audio(self.ws, self.greeting)
+
+            while not self.stop_event.is_set():
+                time.sleep(0.1)
+
+            self.machine.transition(RealtimeState.CLOSING, "stop_event")
             try:
-                ws.close()
+                self.ws.send_close()
             except Exception:
                 pass
+
+            if self.recv_thread:
+                self.recv_thread.join(timeout=2.0)
+            if self.send_thread:
+                self.send_thread.join(timeout=2.0)
+            self.machine.transition(RealtimeState.CLOSED, "closed")
+            print("Verbindung geschlossen")
+
+        except Exception as e:
+            self.error = e
+            print(f"Verbindung fehlgeschlagen: {e}")
+            self.machine.transition(RealtimeState.ERROR, "connect_to_openai")
+        finally:
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+            self.closed_event.set()
+
+
+def start_openai_session(mic_queue, audio_buffer, audio_lock, stop_event, role, gespraechspartner, greeting=None, enable_microphone=False):
+    """Nicht-blockierender Einstieg für Vorwärmen während Klingeln/Freiton."""
+    return OpenAIRealtimeSession(
+        mic_queue,
+        audio_buffer,
+        audio_lock,
+        stop_event,
+        role,
+        gespraechspartner,
+        greeting=greeting,
+    ).start(enable_microphone=enable_microphone)
+
+
+def connect_to_openai(mic_queue, audio_buffer, audio_lock, stop_event, role, gespraechspartner, greeting=None):
+    """
+    Rückwärtskompatibler, blockierender Einstieg.
+    Für neue Call-Flows besser start_openai_session() verwenden.
+    """
+    session = start_openai_session(
+        mic_queue,
+        audio_buffer,
+        audio_lock,
+        stop_event,
+        role,
+        gespraechspartner,
+        greeting=greeting,
+        enable_microphone=True,
+    )
+    session.join()
