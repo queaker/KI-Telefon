@@ -132,6 +132,11 @@ DEFAULT_MODEL = "gpt-realtime-mini"
 
 Damit können einfache Rollen weiterhin ressourcenschonend mit dem Standardmodell laufen, während anspruchsvollere Rollen wie **„Verrückter Professor“** oder **„Künstliche Intelligenz“** gezielt ein leistungsfähigeres Modell verwenden.
 
+### Vorgeladene OpenAI-Session während Freiton und Klingeln
+
+Die Verbindung zur OpenAI-Realtime-API wird nicht mehr erst nach dem Freiton bzw. nach dem Abheben aufgebaut, sondern bereits während der Wartezeit vorbereitet. Bei ausgehenden Anrufen startet die Realtime-Session direkt nach der Rollenauswahl parallel zum Freiton. Die Datei greeting.wav wird ebenfalls bereits in dieser Phase an OpenAI übertragen und verarbeitet.
+
+Dadurch ist die KI beim eigentlichen Gesprächsbeginn deutlich schneller reaktionsbereit. Das Mikrofon wird während des Vorladens noch nicht an OpenAI weitergeleitet, damit Freiton, Klingelgeräusche oder Umgebungsgeräusche nicht versehentlich als Gesprächseingabe verarbeitet werden. Erst wenn der Freiton beendet ist bzw. der Hörer abgenommen wurde, wird das Mikrofon für die laufende Session freigegeben.
 
 ## Wichtige Dateien
 
