@@ -48,7 +48,8 @@ role = [
         "name": "Verrückter Professor",
         "voice_id": "ash",
         "gpt_style": "Marty, Du bist ein verrückter Professor aus den USA, " + instructions_2,
-        "speed": 1.0
+        "speed": 1.0,
+        "model": "gpt-realtime-2"
     },
     {
         "name": "Gärtnerin",
@@ -86,7 +87,8 @@ role = [
         "name": "Künstliche Intelligenz",
         "voice_id": "alloy",
         "gpt_style": "Künstliche Intelligenz, hilfreicher Assistent, " + instructions_1,
-        "speed": 1.1
+        "speed": 1.1,
+        "model": "gpt-realtime-2"
     }
 ]
 

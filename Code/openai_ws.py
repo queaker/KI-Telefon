@@ -19,9 +19,25 @@ from gespraechspartner import personen_info
 # Proxy aktivieren
 socket.socket = socks.socksocket
 
-MODEL = "gpt-realtime-mini"
-WS_URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
+DEFAULT_MODEL = "gpt-realtime-mini"
 API_KEY = OPENAI_API_KEY
+
+
+def model_for_role(role_ref) -> str:
+    """Liefert das Realtime-Modell für die aktuelle Rolle.
+
+    Rollen können in roles.py optional ein Feld `model` setzen.
+    Fehlt dieses Feld, wird DEFAULT_MODEL verwendet.
+    """
+    try:
+        role = role_ref[0]
+        return role.get("model", DEFAULT_MODEL)
+    except Exception:
+        return DEFAULT_MODEL
+
+
+def ws_url_for_model(model: str) -> str:
+    return f"wss://api.openai.com/v1/realtime?model={model}"
 
 # Audio: PCM16, mono, 24 kHz
 AUDIO_RATE = 24000
@@ -161,7 +177,7 @@ def msg_session_update(gespraechspartner_ref, role_ref) -> Dict[str, Any]:
         "type": "session.update",
         "session": {
             "type": "realtime",
-            "model": MODEL,
+            "model": model_for_role(role_ref),
             "instructions": build_instructions(gespraechspartner_ref, role_ref),
             "output_modalities": ["audio"],
             "max_output_tokens": 4096,
@@ -372,8 +388,11 @@ def connect_to_openai(mic_queue, audio_buffer, audio_lock, stop_event, role, ges
 
     try:
         machine.transition(RealtimeState.CONNECTING, "connect")
+        selected_model = model_for_role(role)
+        print(f"Realtime-Modell: {selected_model}")
+
         ws = create_connection_with_ipv4(
-            WS_URL,
+            ws_url_for_model(selected_model),
             header=[
                 f"Authorization: Bearer {API_KEY}",
                 # GA: Kein 'OpenAI-Beta: realtime=v1' Header mehr.
